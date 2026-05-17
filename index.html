@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบตรวจจับบุคคล</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #1a1a1a;
+            color: white;
+            font-family: sans-serif;
+            overflow: hidden;
+        }
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 80vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        /* ซ่อนวิดีโอต้นฉบับไว้ เราจะวาดมันลงบน Canvas แทน */
+        video {
+            display: none;
+        }
+        canvas {
+            position: absolute;
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+        #ui {
+            padding: 20px;
+            text-align: center;
+            height: 20vh;
+        }
+        button {
+            padding: 15px 30px;
+            font-size: 18px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        #status {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #ffcc00;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="container">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <div id="ui">
+        <button id="startButton">เริ่มเปิดกล้องและระบบตรวจจับ</button>
+        <div id="status">รอการเริ่มทำงาน...</div>
+    </div>
+
+    <audio id="alertSound" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" preload="auto"></audio>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const statusText = document.getElementById('status');
+        const alertSound = document.getElementById('alertSound');
+
+        let model;
+        let isDetecting = false;
+        let soundCooldown = false;
+
+        // ฟังก์ชันเริ่มการทำงานเมื่อกดปุ่ม
+        startButton.addEventListener('click', async () => {
+            startButton.style.display = 'none';
+            statusText.innerText = 'กำลังโหลดโมเดล AI... (อาจใช้เวลาสักครู่)';
+            
+            // หลอกให้เบราว์เซอร์อนุญาตให้เล่นเสียงได้
+            alertSound.play().then(() => { alertSound.pause(); }).catch(() => {});
+
+            try {
+                // โหลดโมเดล COCO-SSD
+                model = await cocoSsd.load();
+                statusText.innerText = 'กำลังเปิดกล้อง...';
+                
+                // ขออนุญาตเปิดกล้องหลัง (facingMode: 'environment')
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment' },
+                    audio: false
+                });
+                
+                video.srcObject = stream;
+                
+                // รอให้วิดีโอโหลดข้อมูลเสร็จก่อน
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    statusText.innerText = 'ระบบกำลังทำงาน (กำลังตรวจจับคน)';
+                    detectFrame();
+                };
+
+            } catch (error) {
+                console.error(error);
+                statusText.innerText = 'เกิดข้อผิดพลาด: ไม่สามารถเข้าถึงกล้องได้ หรือโหลดโมเดลไม่สำเร็จ';
+            }
+        });
+
+        // ฟังก์ชันตรวจจับคนและวาดกรอบ
+        async function detectFrame() {
+            // วาดภาพจากวิดีโอลงบน Canvas
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // ใช้โมเดลพยากรณ์วัตถุในเฟรม
+            const predictions = await model.detect(video);
+
+            let personDetected = false;
+
+            // วนลูปตรวจสอบผลลัพธ์
+            predictions.forEach(prediction => {
+                // หากวัตถุที่ตรวจจับได้คือ 'person' (คน)
+                if (prediction.class === 'person') {
+                    personDetected = true;
+
+                    const [x, y, width, height] = prediction.bbox;
+
+                    // วาดกรอบสี่เหลี่ยมสีเหลือง
+                    ctx.strokeStyle = '#FFFF00';
+                    ctx.lineWidth = 4;
+                    ctx.strokeRect(x, y, width, height);
+
+                    // เขียนข้อความพร้อมความแม่นยำ
+                    ctx.fillStyle = '#FFFF00';
+                    ctx.font = '24px Arial';
+                    ctx.fillText(`Person ${Math.round(prediction.score * 100)}%`, x, y > 20 ? y - 10 : 20);
+                }
+            });
+
+            // เล่นเสียงแจ้งเตือนถ้าเจอคน และไม่ได้ติด Cooldown
+            if (personDetected && !soundCooldown) {
+                playSound();
+            }
+
+            // ทำซ้ำในเฟรมถัดไป
+            requestAnimationFrame(detectFrame);
+        }
+
+        // ฟังก์ชันเล่นเสียงและตั้งเวลา Cooldown เพื่อไม่ให้เสียงดังรัวเกินไป
+        function playSound() {
+            alertSound.currentTime = 0;
+            alertSound.play().catch(e => console.log("Audio play blocked by browser"));
+            soundCooldown = true;
+            
+            // ป้องกันไม่ให้เสียงดังซ้ำภายใน 2 วินาที (2000 มิลลิวินาที)
+            setTimeout(() => {
+                soundCooldown = false;
+            }, 2000); 
+        }
+    </script>
+</body>
+</html>
